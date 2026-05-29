@@ -9,7 +9,7 @@
 #     ./install.sh -h             help
 #
 # Curl-pipeable:
-#     curl -fsSL https://raw.githubusercontent.com/Kubandir/dwlarp/main/install.sh | sh
+#     curl -fsSL https://raw.githubusercontent.com/darealhoks/dwlarp/main/install.sh | sh
 
 set -eu
 
@@ -46,7 +46,22 @@ if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/dwl/dwl.c" ]; then
 else
 	SRC=$(mktemp -d)/dwlarp
 	say "cloning source"
-	git clone --depth=1 https://github.com/Kubandir/dwlarp.git "$SRC"
+	git clone --depth=1 https://github.com/darealhoks/dwlarp.git "$SRC"
+fi
+
+# ---- locate wisp source (sibling repo) ----
+# wisp is its own repo (github.com/darealhoks/wisp). A local dwlarp checkout
+# normally has it beside it at ../wisp; otherwise — notably the remote
+# curl|sh install where only dwlarp was cloned into a tmpdir — fetch it.
+# Override with WISP_SRC=path (e.g. point at an existing working copy).
+if [ -n "${WISP_SRC:-}" ]; then
+	[ -f "$WISP_SRC/Makefile" ] || die "WISP_SRC=$WISP_SRC has no Makefile"
+elif [ -f "$SRC/../wisp/Makefile" ]; then
+	WISP_SRC=$SRC/../wisp
+else
+	WISP_SRC=$(mktemp -d)/wisp
+	say "cloning wisp source"
+	git clone --depth=1 https://github.com/darealhoks/wisp.git "$WISP_SRC"
 fi
 
 # ---- host selection ----
@@ -323,10 +338,10 @@ build_all() {
 	build_install "$SUDO" dwl             "$SRC/dwl"             /usr/bin/dwl                       /usr   HOSTCONFIG="$CONFIG"
 	# wisp ships two binaries; build_install only checks the first. Install the
 	# whole target tree so both wisp and wispctl land in ~/.local/bin.
-	say "building wisp"
-	[ "${FORCE:-0}" = 1 ] && make -C "$SRC/../wisp" distclean >/dev/null 2>&1 || true
-	make -C "$SRC/../wisp"
-	make -C "$SRC/../wisp" PREFIX="$HOME/.local" install
+	say "building wisp ($WISP_SRC)"
+	[ "${FORCE:-0}" = 1 ] && make -C "$WISP_SRC" distclean >/dev/null 2>&1 || true
+	make -C "$WISP_SRC"
+	make -C "$WISP_SRC" PREFIX="$HOME/.local" install
 	build_install "$SUDO" mullvad-menu    "$SRC/mullvad-menu"    /usr/local/bin/mullvad-menu        /usr/local   HOSTCONFIG="$CONFIG"
 }
 
