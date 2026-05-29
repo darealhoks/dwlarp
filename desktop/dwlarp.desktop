@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=dwlarp
+Comment=dwm for Wayland
+Exec=dwlarp
+Type=Application

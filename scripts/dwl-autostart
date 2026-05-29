@@ -1,0 +1,102 @@
+#!/bin/sh
+# Spawned from dwl -s, so WAYLAND_DISPLAY/XDG_RUNTIME_DIR are set.
+# Detached from dwl's stdout to free dwl's pipe (status feeder uses it).
+exec </dev/null >/dev/null 2>&1
+
+_restart() {
+    pkill -x "$1" 2>/dev/null
+    sleep 0.1
+    shift
+    "$@" &
+}
+
+# Cursor theme/size — written by the installer from config.h.
+[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/dwlarp/env" ] \
+    && . "${XDG_CONFIG_HOME:-$HOME/.config}/dwlarp/env"
+
+# Export wayland env to dbus / systemd user so portals & spawned daemons see it.
+# XDG_CURRENT_DESKTOP=wlroots: xdg-desktop-portal-wlr's wlr.portal lists
+# `UseIn=wlroots;sway;…` and does NOT include `dwl`, so calling it "dwl"
+# breaks ScreenCast routing. "wlroots" matches and is the canonical
+# generic for any wlroots compositor.
+export XDG_CURRENT_DESKTOP=wlroots
+dbus-update-activation-environment --systemd \
+    DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE=wayland \
+    XCURSOR_THEME XCURSOR_SIZE 2>/dev/null
+
+# Audio — leave an existing PipeWire instance alone (systemd --user already
+# manages it on Debian/GNOME). Only start it if nothing is running and the
+# binaries exist.
+if ! pgrep -x pipewire >/dev/null 2>&1; then
+    if command -v pipewire >/dev/null 2>&1; then
+        _restart pipewire pipewire
+        sleep 0.3
+        command -v pipewire-pulse >/dev/null 2>&1 && _restart pipewire-pulse pipewire-pulse
+        command -v wireplumber  >/dev/null 2>&1 && _restart wireplumber  wireplumber
+    fi
+fi
+
+# Wallpaper, bar, HUD, OSD, menu, notifications, and native output-add/remove
+# (which triggers dwl-autolayout on monitor hotplug) — all owned by wisp.
+# Started by scripts/dwlarp via `dwl -s ... wisp`, so nothing to spawn here.
+# Layout policy (above|below|left|right of internal) lives in
+# ~/.config/dwl/layout (one word).
+
+# Night mode schedule + moon HUD override now owned by wisp itself
+# (gamma.c speaks zwlr_gamma_control_v1 directly). wlsunset retired.
+
+# Mullvad VPN — connect by default at login. Block up to 10s for the wifi
+# layer (iwd) to acquire a default route before attempting the handshake —
+# the previous unconditional `up` raced iwd association on cold boot and
+# bailed out before a single relay could be pinged. Backgrounded so dwl-
+# autostart returns promptly; the result is surfaced via wisp notifications
+# so a missing relay cache or sudoers permission isn't silent.
+if command -v mullvad-vpn >/dev/null 2>&1; then
+    (
+        # Wait for L3: a default route AND a reachable nameserver. ip-route
+        # alone is necessary but not sufficient on flaky captive networks.
+        deadline=$(( $(date +%s) + 10 ))
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+            ip route show default 2>/dev/null | grep -q '^default ' && break
+            sleep 1
+        done
+
+        if out=$(sudo -n /usr/local/bin/mullvad-vpn up 2>&1); then
+            host=$(printf '%s\n' "$out" | awk '/^connected via/ {print $3; exit}')
+            notify-send -a Mullvad -i network-vpn 'Mullvad VPN' \
+                "Connected${host:+ — $host}" 2>/dev/null || true
+        else
+            # Most common failure: relays cache missing — point the user at the
+            # bootstrap step rather than letting the toggle silently stay off.
+            case "$out" in
+                *"missing"*|*"legacy format"*)
+                    notify-send -a Mullvad -i dialog-warning 'Mullvad VPN' \
+                        'Run: sudo mullvad-wg-setup <ACCOUNT>' 2>/dev/null || true ;;
+                *)
+                    notify-send -a Mullvad -i dialog-warning 'Mullvad VPN' \
+                        "Auto-connect failed: $out" 2>/dev/null || true ;;
+            esac
+        fi
+    ) &
+fi
+
+# xdg-desktop-portal (file pickers, screen share). libexec path differs across distros.
+find_portal() {
+    for p in /usr/libexec/"$1" /usr/lib/"$1" /usr/lib/x86_64-linux-gnu/"$1"; do
+        [ -x "$p" ] && { echo "$p"; return; }
+    done
+}
+PORTAL=$(find_portal xdg-desktop-portal)
+PORTAL_GTK=$(find_portal xdg-desktop-portal-gtk)
+PORTAL_WLR=$(find_portal xdg-desktop-portal-wlr)
+if [ -n "$PORTAL" ]; then
+    (
+        # wlr backend first — it owns ScreenCast/Screenshot per dwl-portals.conf,
+        # and starting it before the main portal avoids a race where the first
+        # screen-share request resolves to a backend that doesn't implement it.
+        [ -n "$PORTAL_WLR" ] && "$PORTAL_WLR" &
+        sleep 0.3
+        sleep 2; "$PORTAL" --replace &
+        [ -n "$PORTAL_GTK" ] && { sleep 0.5; "$PORTAL_GTK" --replace & }
+    ) &
+fi

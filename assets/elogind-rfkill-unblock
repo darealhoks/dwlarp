@@ -1,0 +1,8 @@
+#!/bin/sh
+# elogind system-sleep hook: keep wifi+bluetooth unblocked across hibernate.
+# Background retries catch delayed firmware/ACPI rfkill events (hp_wmi).
+# elogind invokes hooks as: $1 = pre|post, $2 = suspend|hibernate|hybrid-sleep
+[ "$1" = post ] || exit 0
+rfkill unblock wifi bluetooth
+for s in 2 6 15; do (sleep "$s"; rfkill unblock wifi bluetooth) & done
+exit 0

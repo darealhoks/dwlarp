@@ -1,0 +1,37 @@
+#!/bin/sh
+# Selection screenshot with frozen-screen view.
+#
+# --enable-keyboard is inversely named upstream: it RELEASES wayfreeze's
+# exclusive keyboard grab so slurp receives Esc. --after-freeze-cmd is a
+# synchronous "surface mapped" signal — strictly tighter than a sleep, no
+# race on slow systems. flock drops key-repeat double-fires. Falls through
+# to live capture if wayfreeze isn't installed.
+#
+# wl-copy forks a clipboard daemon that outlives this script; without 9>&-
+# it inherits the lock fd and the next invocation silently no-ops on flock.
+exec 9>"/tmp/dwlarp-screenshot.$USER.lock"
+flock -n 9 || exit 0
+
+if command -v wayfreeze >/dev/null 2>&1; then
+	FIFO=$(mktemp -u)
+	mkfifo "$FIFO"
+	trap 'kill "$WF" 2>/dev/null; rm -f "$FIFO"' EXIT INT TERM HUP
+	wayfreeze --enable-keyboard --hide-cursor \
+		--after-freeze-cmd "printf x >$FIFO" 9>&- >/dev/null 2>&1 &
+	WF=$!
+	read _ <"$FIFO"
+fi
+
+# dwl hands grim a premultiplied-alpha output buffer with a partial alpha
+# channel (from semi-transparent surfaces). Scanout ignores alpha, so the RGB
+# already is what's on screen — but grim writes it into a PNG as straight
+# alpha, so anything that honors the alpha (color pickers) reads shifted
+# colors. Drop the alpha channel, keeping RGB, to ship the on-screen pixels.
+SELECTION=$(slurp) || exit 1
+if command -v magick >/dev/null 2>&1; then
+	grim -g "$SELECTION" - | magick png:- -alpha off png:- | wl-copy --type image/png 9>&-
+elif command -v convert >/dev/null 2>&1; then
+	grim -g "$SELECTION" - | convert png:- -alpha off png:- | wl-copy --type image/png 9>&-
+else
+	grim -g "$SELECTION" - | wl-copy --type image/png 9>&-
+fi

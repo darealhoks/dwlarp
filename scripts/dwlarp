@@ -1,0 +1,29 @@
+#!/bin/sh
+# Launches dwl with the wisp widget daemon (bar + status + HUD + OSD + menu +
+# notifications, all in one process). dwl-autostart is detached from dwl's
+# stdout pipe; wisp reads dwl's IPC over its own wl_registry binding.
+#
+# `dbus-run-session` wraps the whole session so apps that need a user dbus
+# bus (bluetuith, gnome-keyring, portals) can find one. If a bus is already
+# inherited from the seat (elogind/systemd-logind) we skip the wrapper.
+#
+# Source cursor theme/size HERE (before dwl spawns) — wlroots reads
+# XCURSOR_THEME at compositor startup to pick the root cursor, and dwl-autostart
+# is a child of dwl so it can't influence dwl's own env.
+# dwlarp installs scripts (ws-pomodoro, ws-powermenu, …) and wisp/wispctl to
+# ~/.local/bin; dwl's spawn() uses execvp so anything bound via WS_*_CMD
+# needs to be on PATH at compositor start. Prepend it here so the user
+# doesn't need /etc/profile.d/xdg.sh or per-shell rc to find them.
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH"; export PATH ;; esac
+
+[ -r "${XDG_CONFIG_HOME:-$HOME/.config}/dwlarp/env" ] \
+	&& . "${XDG_CONFIG_HOME:-$HOME/.config}/dwlarp/env"
+
+LOGDIR=${XDG_CACHE_HOME:-$HOME/.cache}/dwlarp
+mkdir -p "$LOGDIR"
+DWL_CMD='dwl -s "$HOME/.local/bin/dwl-autostart & exec $HOME/.local/bin/wisp 2>>'"$LOGDIR"'/wisp.log"'
+
+if [ -n "$DBUS_SESSION_BUS_ADDRESS" ] || ! command -v dbus-run-session >/dev/null 2>&1; then
+	exec sh -c "$DWL_CMD"
+fi
+exec dbus-run-session sh -c "$DWL_CMD"
