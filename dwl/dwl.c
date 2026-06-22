@@ -539,16 +539,12 @@ applyrules(Client *c)
 
 	appid = client_get_appid(c);
 	title = client_get_title(c);
-	fprintf(stderr, "[dwl applyrules] appid=%s title=%s\n",
-			appid ? appid : "(null)", title ? title : "(null)");
 
 	for (r = rules; r < END(rules); r++) {
 		if ((!r->title || (title && strstr(title, r->title)))
 				&& (!r->id || (appid && strstr(appid, r->id)))) {
 			c->isfloating = r->isfloating;
 			newtags |= r->tags;
-			fprintf(stderr, "[dwl applyrules]   match: id=%s title=%s -> floating=%d\n",
-					r->id ? r->id : "*", r->title ? r->title : "*", r->isfloating);
 			i = 0;
 			wl_list_for_each(m, &mons, link) {
 				if (r->monitor == i++)
@@ -676,6 +672,22 @@ axisnotify(struct wl_listener *listener, void *data)
 			event->delta_discrete, event->source, event->relative_direction);
 }
 
+/* Tear down all interactive-drag state. Called from the button-release path
+ * and from unmapnotify when the grabbed client dies mid-drag — both must reset
+ * the full set of drag globals, not just cursor_mode/grabc, or previews stay
+ * painted and resizing_from_mouse sticks (killing the ratio keybinds). */
+static void
+enddrag(void)
+{
+	resizing_from_mouse = 0;
+	wlr_scene_node_set_enabled(&resize_preview_v->node, 0);
+	wlr_scene_node_set_enabled(&resize_preview_h->node, 0);
+	wlr_scene_node_set_enabled(&move_preview->node, 0);
+	grab_cursor_name = NULL;
+	cursor_mode = CurNormal;
+	grabc = NULL;
+}
+
 void
 buttonpress(struct wl_listener *listener, void *data)
 {
@@ -743,16 +755,11 @@ buttonpress(struct wl_listener *listener, void *data)
 				}
 			}
 			/* Default behaviour */
-			wlr_scene_node_set_enabled(&resize_preview_v->node, 0);
-			wlr_scene_node_set_enabled(&resize_preview_h->node, 0);
-			wlr_scene_node_set_enabled(&move_preview->node, 0);
-			grab_cursor_name = NULL;
 			wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
-			cursor_mode = CurNormal;
 			/* Drop the window off on its new monitor */
 			selmon = xytomon(cursor->x, cursor->y);
 			setmon(grabc, selmon, 0);
-			grabc = NULL;
+			enddrag();
 			return;
 		}
 		grab_cursor_name = NULL;
@@ -1431,13 +1438,17 @@ destroynotify(struct wl_listener *listener, void *data)
 {
 	/* Called when the xdg_toplevel is destroyed. */
 	Client *c = wl_container_of(listener, c, destroy);
+	Monitor *m;
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
 	wl_list_remove(&c->fullscreen.link);
-	/* We check if the destroyed client was part of any tiled_list, to catch
-	 * client removals even if they would not be currently managed by btrtile */
-	if (selmon && selmon->root)
-		remove_client(selmon, c);
+	/* Prune the dying client from every monitor's tree. The normal cleanup
+	 * (unmap → arrange → btrtile prune) only runs on monitors that are both
+	 * enabled and currently in the BSP layout, so a node can otherwise outlive
+	 * its freed Client and become a use-after-free on the next arrange. */
+	wl_list_for_each(m, &mons, link)
+		if (m->root)
+			remove_client(m, c);
 #ifdef XWAYLAND
 	if (c->type != XDGShell) {
 		wl_list_remove(&c->activate.link);
@@ -1531,10 +1542,17 @@ void
 dwl_ipc_manager_get_output(struct wl_client *client, struct wl_resource *resource, uint32_t id, struct wl_resource *output)
 {
 	DwlIpcOutput *ipc_output;
-	Monitor *monitor = wlr_output_from_resource(output)->data;
+	struct wlr_output *wlr_output = wlr_output_from_resource(output);
+	Monitor *monitor = wlr_output ? wlr_output->data : NULL;
 	struct wl_resource *output_resource = wl_resource_create(client, &zdwl_ipc_output_v2_interface, wl_resource_get_version(resource), id);
 	if (!output_resource)
 		return;
+	if (!monitor) {
+		/* output is gone (inert resource or mid-unplug); leave the IPC output
+		 * resource inert — the inbound handlers all guard on !ipc_output. */
+		wl_resource_set_implementation(output_resource, &dwl_output_implementation, NULL, NULL);
+		return;
+	}
 
 	ipc_output = ecalloc(1, sizeof(*ipc_output));
 	ipc_output->resource = output_resource;
@@ -1636,7 +1654,7 @@ dwl_ipc_output_set_client_tags(struct wl_client *client, struct wl_resource *res
 	selected_client->tags = newtags;
 	if (selmon == monitor)
 		focusclient(focustop(monitor), 1);
-	arrange(selmon);
+	arrange(monitor);
 	printstatus();
 }
 
@@ -1709,6 +1727,15 @@ client_set_opacity(Client *c, float opacity)
 	wlr_scene_node_for_each_buffer(&c->scene_surface->node, setbufopacity, &opacity);
 }
 
+/* Only terminals dim when unfocused; GUI apps stay fully opaque. Matched by
+ * app_id substring against termappid (foot's default app_id), same as rules. */
+int
+client_is_terminal(Client *c)
+{
+	const char *appid = client_get_appid(c);
+	return termappid && appid && strstr(appid, termappid);
+}
+
 void
 focusclient(Client *c, int lift)
 {
@@ -1762,7 +1789,8 @@ focusclient(Client *c, int lift)
 		 * and probably other clients */
 		} else if (old_c && !client_is_unmanaged(old_c) && (!c || !client_wants_focus(c))) {
 			client_set_border_color(old_c, bordercolor);
-			client_set_opacity(old_c, unfocus_opacity);
+			if (client_is_terminal(old_c))
+				client_set_opacity(old_c, unfocus_opacity);
 
 			client_activate_surface(old, 0);
 		}
@@ -2596,6 +2624,19 @@ rendermon(struct wl_listener *listener, void *data)
 	wl_list_for_each(c, &clients, link) {
 		if (c->resize && !c->isfloating && client_is_rendered_on_mon(c, m) && !client_is_stopped(c))
 			goto skip;
+	}
+
+	/* The xbps scenefx and wlroots disagree on struct wlr_scene_buffer's layout
+	 * (scenefx inserts corner_radius/blur fields ahead of opacity), and dwl's
+	 * surface trees are built by wlroots' wlr_scene_xdg_surface_create — which
+	 * scenefx doesn't override. So wlroots' surface-commit path overwrites the
+	 * scenefx opacity field every time a client posts a frame, undoing unfocus
+	 * dimming after one frame. Reassert each visible client's intended opacity
+	 * right before the scene renders; wlr_scene_buffer_set_opacity() no-ops when
+	 * unchanged, so this only repaints a client the frame its opacity was lost. */
+	wl_list_for_each(c, &clients, link) {
+		if (c->scene_surface && client_is_rendered_on_mon(c, m))
+			wlr_scene_node_for_each_buffer(&c->scene_surface->node, setbufopacity, &c->opacity);
 	}
 
 	wlr_scene_output_commit(m->scene_output, NULL);
@@ -3478,16 +3519,21 @@ unmapnotify(struct wl_listener *listener, void *data)
 {
 	/* Called when the surface is unmapped, and should no longer be shown. */
 	Client *c = wl_container_of(listener, c, unmap);
-	if (c == grabc) {
-		cursor_mode = CurNormal;
-		grabc = NULL;
-	}
+	if (c == grabc)
+		enddrag();
 
 	if (client_is_unmanaged(c)) {
-		if (c == exclusive_focus) {
+		if (c == exclusive_focus)
 			exclusive_focus = NULL;
+		/* An unmanaged surface (X11 override-redirect: combo/menu popups,
+		 * e.g. a file-chooser dropdown) can hold the seat keyboard focus
+		 * without being exclusive_focus. If we don't hand focus off here,
+		 * seat->keyboard_state.focused_surface keeps pointing at this
+		 * surface after its scene node is destroyed below — the next seat
+		 * keyboard op then asserts in wlroots and aborts the whole
+		 * compositor. Reassign whenever it held keyboard focus. */
+		if (client_surface(c) == seat->keyboard_state.focused_surface)
 			focusclient(focustop(selmon), 1);
-		}
 	} else {
 		wl_list_remove(&c->link);
 		setmon(c, NULL, 0);

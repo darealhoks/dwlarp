@@ -24,6 +24,11 @@ dbus-update-activation-environment --systemd \
     DISPLAY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE=wayland \
     XCURSOR_THEME XCURSOR_SIZE 2>/dev/null
 
+# foot server: one process backs every `footclient` terminal (shared font
+# cache, libs, GPU/shm setup) instead of ~20 MB per standalone foot. Idempotent
+# — skip if a server (or any bare `foot`) is already running.
+pgrep -x foot >/dev/null 2>&1 || foot --server &
+
 # Audio — leave an existing PipeWire instance alone (systemd --user already
 # manages it on Debian/GNOME). Only start it if nothing is running and the
 # binaries exist.
@@ -36,6 +41,14 @@ if ! pgrep -x pipewire >/dev/null 2>&1; then
     fi
 fi
 
+# Fast app launches.
+# vesktop: started minimized to tray — already running, so opening = un-minimize.
+if command -v vesktop >/dev/null 2>&1 && ! pgrep -x vesktop >/dev/null 2>&1; then
+    vesktop --start-minimized &
+fi
+# librewolf + code: pin on-disk files into RECLAIMABLE page cache (vmtouch -t).
+command -v ram-preload >/dev/null 2>&1 && ram-preload &
+
 # Wallpaper, bar, HUD, OSD, menu, notifications, and native output-add/remove
 # (which triggers dwl-autolayout on monitor hotplug) — all owned by wisp.
 # Started by scripts/dwlarp via `dwl -s ... wisp`, so nothing to spawn here.
@@ -45,13 +58,15 @@ fi
 # Night mode schedule + moon HUD override now owned by wisp itself
 # (gamma.c speaks zwlr_gamma_control_v1 directly). wlsunset retired.
 
-# Mullvad VPN — connect by default at login. Block up to 10s for the wifi
-# layer (iwd) to acquire a default route before attempting the handshake —
-# the previous unconditional `up` raced iwd association on cold boot and
-# bailed out before a single relay could be pinged. Backgrounded so dwl-
-# autostart returns promptly; the result is surfaced via wisp notifications
-# so a missing relay cache or sudoers permission isn't silent.
-if command -v mullvad-vpn >/dev/null 2>&1; then
+# Mullvad VPN — opt-in autoconnect via WS_VPN_AUTOCONNECT in
+# ~/.config/dwlarp/env (default 0). Off by default because a half-up
+# tunnel leaves /etc/resolv.conf pointing at the WG resolver and breaks
+# DNS until torn down cleanly. When enabled, block up to 10s for the wifi
+# layer (iwd) to acquire a default route before attempting the handshake;
+# backgrounded so dwl-autostart returns promptly; the result is surfaced
+# via wisp notifications so a missing relay cache or sudoers permission
+# isn't silent.
+if [ "${WS_VPN_AUTOCONNECT:-0}" = 1 ] && command -v mullvad-vpn >/dev/null 2>&1; then
     (
         # Wait for L3: a default route AND a reachable nameserver. ip-route
         # alone is necessary but not sufficient on flaky captive networks.

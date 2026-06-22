@@ -29,6 +29,7 @@ static const int bypass_surface_visibility = 0;
 static const unsigned int borderpx         = WS_BORDER_PX;
 static const int border_radius             = WS_BORDER_RADIUS;
 static const float unfocus_opacity         = WS_UNFOCUS_OPACITY;
+static const char *termappid               = WS_TERM_APPID;
 static const float shadow_sigma            = WS_SHADOW_SIGMA;
 static const float shadowcolor[]           = {0.0f, 0.0f, 0.0f, WS_SHADOW_ALPHA};
 static const unsigned int gappx            = WS_GAP_PX;

@@ -1,0 +1,46 @@
+#!/bin/sh
+# ram-preload — keep hot app files in the kernel page cache so launches are
+# disk-I/O-free.
+#
+# Uses `vmtouch -t` (TOUCH, not lock): pages are read into memory but stay fully
+# reclaimable — they show under buff/cache, count toward "available" in free(1),
+# and the kernel evicts them the instant anything needs the RAM. No root, no
+# mlock, no ulimit bump. On 32 GB this footprint (~360 MB) is noise.
+#
+# Why a loop: the first pass warms the cache for the post-login window before
+# you launch anything. The periodic re-touch is cheap insurance — if a rare
+# memory spike evicts a page, the next sweep pulls it back. Re-touching pages
+# that are already resident is a near-instant no-op, so the interval is long
+# only to avoid pointless wakeups, not because the work is expensive.
+#
+# vesktop is deliberately NOT listed here: dwl-autostart launches it minimized,
+# so it's already a running process — its files get cached for free and "launch"
+# is just un-minimizing. Preloading files only helps apps that start cold.
+
+PATHS="/usr/lib/librewolf /usr/lib/code-oss"
+INTERVAL=600
+
+# Singleton: a compositor restart re-runs dwl-autostart, which would spawn a
+# second copy of this loop. flock on a runtime-dir lock makes us idempotent —
+# the second instance grabs nothing and exits.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/ram-preload.lock"
+flock -n 9 || exit 0
+
+# Clean termination: the periodic `sleep` runs as a child process that inherits
+# our lock fd. A plain SIGTERM kills this script but leaves that sleep orphaned
+# (reparented to init), still holding the lock — which would block the next
+# instance from starting for up to one full INTERVAL. So we track the sleep's
+# PID and kill it on the way out.
+sleep_pid=
+cleanup() { [ -n "$sleep_pid" ] && kill "$sleep_pid" 2>/dev/null; exit 0; }
+trap cleanup INT TERM
+
+# First pass blocks (~1 s cold, instant if already warm) so the cache is hot
+# immediately; the caller backgrounds us with &, so this never delays login.
+vmtouch -tq $PATHS
+
+while :; do
+    sleep "$INTERVAL" & sleep_pid=$!
+    wait "$sleep_pid"
+    vmtouch -tq $PATHS
+done

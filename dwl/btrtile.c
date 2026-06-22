@@ -58,7 +58,8 @@ apply_layout(Monitor *m, LayoutNode *node,
 {
 	Client *c;
 	float ratio;
-	unsigned int left_count, right_count, mid;
+	unsigned int left_count, right_count;
+	int mid, gap = (int)gappx;
 	struct wlr_box left_area, right_area;
 
 	if (!node)
@@ -98,29 +99,39 @@ apply_layout(Monitor *m, LayoutNode *node,
 	memset(&left_area, 0, sizeof(left_area));
 	memset(&right_area, 0, sizeof(right_area));
 
+	/* Keep all split math in int: area dimensions can drop below the gap on a
+	 * deep/degenerate tree, and an unsigned cast of a negative float (C11
+	 * 6.3.1.4) or an unsigned underflow would wrap to a ~2e9-px box. Clamp each
+	 * child to >=1px so applybounds never sees a runaway dimension. */
 	if (node->is_split_vertically) {
-		mid = (unsigned int)(area.width * ratio);
+		mid = (int)(area.width * ratio);
 		left_area.x      = area.x;
 		left_area.y      = area.y;
-		left_area.width  = mid - gappx / 2;
+		left_area.width  = mid - gap / 2;
 		left_area.height = area.height;
 
-		right_area.x      = area.x + mid + gappx / 2;
+		right_area.x      = area.x + mid + gap / 2;
 		right_area.y      = area.y;
-		right_area.width  = area.width - mid - gappx / 2;
+		right_area.width  = area.width - mid - gap / 2;
 		right_area.height = area.height;
+
+		if (left_area.width  < 1) left_area.width  = 1;
+		if (right_area.width < 1) right_area.width = 1;
 	} else {
 		/* horizontal split */
-		mid = (unsigned int)(area.height * ratio);
+		mid = (int)(area.height * ratio);
 		left_area.x      = area.x;
 		left_area.y      = area.y;
 		left_area.width  = area.width;
-		left_area.height = mid - gappx / 2;
+		left_area.height = mid - gap / 2;
 
 		right_area.x      = area.x;
-		right_area.y      = area.y + mid + gappx / 2;
+		right_area.y      = area.y + mid + gap / 2;
 		right_area.width  = area.width;
-		right_area.height = area.height - mid - gappx / 2;
+		right_area.height = area.height - mid - gap / 2;
+
+		if (left_area.height  < 1) left_area.height  = 1;
+		if (right_area.height < 1) right_area.height = 1;
 	}
 
 	apply_layout(m, node->left,  left_area,  0);
@@ -156,6 +167,9 @@ btrtile(Monitor *m)
 			found = find_client_node(m->root, c);
 			if (!found) {
 				Client *t, *tc;
+				/* Split the client under the cursor (cursor-oriented
+				 * placement); fall back to the focused client only when the
+				 * cursor isn't over an in-tree client. */
 				t = xytoclient(cursor->x, cursor->y);
 				if (!t || t == c || !find_client_node(m->root, t))
 					t = focustop(m);
@@ -276,9 +290,12 @@ init_tree(Monitor *m)
 {
 	if (!m)
 		return;
-	m->root = calloc(1, sizeof(LayoutNode));
-	if (!m->root)
-		m->root = NULL;
+	/* This empty placeholder node stays m->root for the monitor's lifetime:
+	 * remove_client_node never frees it and sibling-lift re-promotes it, so
+	 * m->root is never NULL and btrtile()'s !m->root guard never blocks
+	 * inserts. ecalloc so an alloc failure dies loudly instead of silently
+	 * disabling tiling on this monitor forever. */
+	m->root = ecalloc(1, sizeof(LayoutNode));
 }
 
 void
@@ -639,22 +656,31 @@ finish_mouse_resize(double cur_x, double cur_y)
 {
 	double dx, dy;
 	Arg a = {0};
+	Monitor *savedmon = selmon;
 
-	if (!selmon)
+	/* sloppyfocus moves selmon to whatever output the cursor is over mid-drag,
+	 * but the ratio setters resolve their target via focustop(selmon). Pin
+	 * selmon to the grabbed client's monitor so the commit resizes the window
+	 * we actually grabbed, not whatever the cursor drifted onto. */
+	if (!grabc || !grabc->mon)
 		return;
+	selmon = grabc->mon;
 	dx = cur_x - resize_last_update_x;
 	dy = cur_y - resize_last_update_y;
-	if (fabs(dx) < 1.0 && fabs(dy) < 1.0)
-		return;
-	/* apply both axes so corner drags resize diagonally */
-	if (fabs(dx) >= 1.0) {
-		a.f = (float)(dx / selmon->m.width);
-		setratio_h(&a);
+	if (fabs(dx) >= 1.0 || fabs(dy) >= 1.0) {
+		/* only commit the axes the grab quadrant actually enabled, matching
+		 * what compute_resize_snap previewed — otherwise a diagonal drift on a
+		 * single-edge grab moves an opposite, un-previewed edge */
+		if (resize_h_ok && fabs(dx) >= 1.0) {
+			a.f = (float)(dx / selmon->m.width);
+			setratio_h(&a);
+		}
+		if (resize_v_ok && fabs(dy) >= 1.0) {
+			a.f = (float)(dy / selmon->m.height);
+			setratio_v(&a);
+		}
 	}
-	if (fabs(dy) >= 1.0) {
-		a.f = (float)(dy / selmon->m.height);
-		setratio_v(&a);
-	}
+	selmon = savedmon;
 }
 
 Client *

@@ -109,6 +109,7 @@ PKGS_void="
 	bluetuith impala pulsemixer
 	wireguard-tools jq libnotify
 	nftables e2fsprogs
+	vmtouch
 	curl unzip"
 PIPEWIRE_void="pipewire wireplumber"
 
@@ -296,6 +297,20 @@ sv_enable() {
 	[ -L "/var/service/$name" ] || $SUDO ln -sf "/etc/sv/$name" "/var/service/$name"
 }
 
+# Inverse of sv_enable — stop the supervisor and remove the symlink so
+# flipping a knob from 1 to 0 in config.h actually takes effect on the
+# next install. Without this, an old WS_VPN_KILLSWITCH=1 install leaves
+# nftables-mullvad starting at every boot and breaks internet until the
+# user manually `sv down`s it.
+sv_disable() {
+	[ "$DISTRO" = void ] || return 0
+	name=$1
+	if [ -L "/var/service/$name" ]; then
+		$SUDO sv down "$name" >/dev/null 2>&1 || true
+		$SUDO rm -f "/var/service/$name"
+	fi
+}
+
 # Papirus-Dark folder accent. The tool is idempotent but rewrites thousands of
 # symlinks (~10s), so cache the last-applied color and short-circuit when it
 # hasn't changed. Full-install only — recoloring isn't part of the --rebuild
@@ -346,7 +361,7 @@ build_all() {
 }
 
 # ---- scripts (single source of truth, used by full install AND --rebuild) ----
-SCRIPTS="dwl-autostart dwl-autolayout dwl-launcher screenshot-area"
+SCRIPTS="dwl-autostart dwl-autolayout dwl-launcher ram-preload screenshot-area"
 # Plain copies (no template substitution — wispctl menu is the only menu now,
 # and wisp owns its own colors via ../wisp/config.h).
 PLAIN_IN_SCRIPTS="ws-pomodoro"
@@ -401,8 +416,10 @@ install_scripts() {
 	install_if_changed "$SUDO" 755 "$SRC/assets/sv-nftables-mullvad/run"     /etc/sv/nftables-mullvad/run
 	install_if_changed "$SUDO" 755 "$SRC/assets/sv-nftables-mullvad/finish"  /etc/sv/nftables-mullvad/finish
 	install_if_changed "$SUDO" 755 "$SRC/assets/sv-nftables-mullvad/log/run" /etc/sv/nftables-mullvad/log/run
-	[ "$(read_num WS_VPN_WATCHDOG)" = 1 ]   && sv_enable mullvad-watchdog
-	[ "$(read_num WS_VPN_KILLSWITCH)" = 1 ] && sv_enable nftables-mullvad
+	if [ "$(read_num WS_VPN_WATCHDOG)" = 1 ]; then sv_enable mullvad-watchdog
+	else                                            sv_disable mullvad-watchdog; fi
+	if [ "$(read_num WS_VPN_KILLSWITCH)" = 1 ]; then sv_enable nftables-mullvad
+	else                                             sv_disable nftables-mullvad; fi
 
 	# elogind sleep hooks: re-unblock wifi+bluetooth on resume, and force a
 	# Mullvad re-rank+up after the WireGuard handshake almost certainly died
@@ -464,8 +481,9 @@ seed_configs() {
 		ln -sf "$HOME/.themes/$gtk_theme/gtk-4.0/gtk-dark.css" "$cfg/gtk-4.0/gtk-dark.css"
 	fi
 
-	sed -e "s|@WS_CURSOR_THEME@|$cursor_theme|g" \
-	    -e "s|@WS_CURSOR_SIZE@|$cursor_size|g"   \
+	sed -e "s|@WS_CURSOR_THEME@|$cursor_theme|g"                       \
+	    -e "s|@WS_CURSOR_SIZE@|$cursor_size|g"                         \
+	    -e "s|@WS_VPN_AUTOCONNECT@|$(read_num WS_VPN_AUTOCONNECT)|g"   \
 	    "$SRC/assets/dwlarp.env.in" > "$cfg/dwlarp/env"
 
 	# GPU-specific env. WS_GPU=nvidia → SW cursors; VA-API/GBM/GLX are pointed

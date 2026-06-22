@@ -78,6 +78,7 @@
 #define WS_BORDER_PX       2       /* window border thickness (pixels) */
 #define WS_BORDER_RADIUS   10      /* window corner radius (px, 0 = square) */
 #define WS_UNFOCUS_OPACITY 1.0f    /* opacity of unfocused windows (1.0 = no dimming) */
+#define WS_TERM_APPID      "foot"  /* only clients whose app_id contains this dim when unfocused; everything else stays opaque */
 #define WS_SHADOW_SIGMA    10.0f   /* shadow blur radius (px) */
 #define WS_SHADOW_ALPHA    0.40f   /* shadow opacity (0.0–1.0) */
 #define WS_GAP_PX          6       /* gap between tiled windows (pixels) */
@@ -180,8 +181,15 @@
  * The tunnel is brought up by scripts/mullvad-vpn (a wg-quick wrapper).
  * Bootstrap once with `sudo mullvad-wg-setup <ACCOUNT>` to register a
  * device and cache the relay catalogue. After that `mullvad-vpn up` is
- * called automatically at login by dwl-autostart, by the post-resume
- * elogind hook, and by mullvad-watchdog if the handshake goes stale.
+ * called from the bar/HUD shield, by the post-resume elogind hook (only
+ * if you were already connected before suspend), and by mullvad-watchdog
+ * if the handshake goes stale while intended state is "up".
+ *
+ * WS_VPN_AUTOCONNECT: 1 makes dwl-autostart run `mullvad-vpn up` at
+ *   login. Default 0 — a half-up tunnel rewrites /etc/resolv.conf and
+ *   breaks DNS until torn down cleanly, so opt in only on hosts where
+ *   you actually want the VPN on by default. Resume/watchdog/HUD paths
+ *   are unaffected; they all honour /run/mullvad.intended.
  *
  * WS_VPN_KEEPALIVE: WireGuard PersistentKeepalive in seconds. Without
  *   this, NAT mappings on home routers expire after 30–180s of idle and
@@ -209,9 +217,10 @@
  *   bring_up tries this region first, then a Central-Europe fallback
  *   set, then global ranking by ping.
  * ------------------------------------------------------------ */
+#define WS_VPN_AUTOCONNECT     0
 #define WS_VPN_KEEPALIVE      25
 #define WS_VPN_STALE_S       180
-#define WS_VPN_KILLSWITCH      1
+#define WS_VPN_KILLSWITCH      0
 #define WS_VPN_WATCHDOG        1
 #define WS_VPN_REGION       "de"
 
@@ -249,13 +258,13 @@
 #define WS_HUD_BUTTONS \
 	{ 1, "pkill -x wlsunset; wlsunset -T 2801 -t 2800",  "pkill -x wlsunset",              NULL, "pgrep -fx 'wlsunset -T 2801 -t 2800' >/dev/null || { pgrep -x wlsunset >/dev/null && h=$(date +%H) && { [ $h -ge 20 ] || [ $h -lt 7 ]; }; }", 0xf186 }, /* moon — night mode. ON when (a) the override `wlsunset -T 2801 -t 2800` is running, OR (b) the scheduled wlsunset is running AND we're in the night window (20:00–07:00). Toggling ON kills the schedule and forces a flatter 2800K; toggling OFF kills wlsunset entirely until next dwl-autostart. */ \
 	{ 1, "makoctl mode -a do-not-disturb", "makoctl mode -r do-not-disturb", NULL, NULL,                          0xf1f6 }, /* bell-slash — DND (needs the [mode=do-not-disturb] block in mako config) */ \
-	{ 1, "foot -T ws-hud-mullvad --app-id=ws-hud-mullvad -e mullvad-menu", \
+	{ 1, "footclient -T ws-hud-mullvad --app-id=ws-hud-mullvad -e mullvad-menu", \
 	     "sudo -n mullvad-vpn down && notify-send -a Mullvad -i network-vpn-disabled 'Mullvad VPN' 'Disconnected' || notify-send -a Mullvad -i dialog-warning 'Mullvad VPN' 'Disconnect failed (run mullvad-wg-setup?)'", \
 	     "sudo -n mullvad-vpn reconnect && notify-send -a Mullvad -i network-vpn 'Mullvad VPN' 'Reconnected' || notify-send -a Mullvad -i dialog-warning 'Mullvad VPN' 'Reconnect failed (see /run/mullvad.log)'", \
 	     "mullvad-vpn health",  0xf132 }, /* shield — Mullvad VPN; exit 0=on (green), 2=stale (red), 1=off. off→opens picker, on→disconnect, stale→direct reconnect (no menu) */ \
-	{ 0, "foot -T ws-hud-bt   --app-id=ws-hud-bt   -e bluetuith --no-warning", NULL, NULL, NULL, 0xf293 }, /* bluetooth */ \
-	{ 0, "foot -T ws-hud-wifi --app-id=ws-hud-wifi -e impala",                 NULL, NULL, NULL, 0xf1eb }, /* wifi */ \
-	{ 0, "foot -T ws-hud-vol  --app-id=ws-hud-vol  -e pulsemixer",             NULL, NULL, NULL, 0xf028 }  /* volume */
+	{ 0, "footclient -T ws-hud-bt   --app-id=ws-hud-bt   -e bluetuith --no-warning", NULL, NULL, NULL, 0xf293 }, /* bluetooth */ \
+	{ 0, "footclient -T ws-hud-wifi --app-id=ws-hud-wifi -e impala",                 NULL, NULL, NULL, 0xf1eb }, /* wifi */ \
+	{ 0, "footclient -T ws-hud-vol  --app-id=ws-hud-vol  -e pulsemixer",             NULL, NULL, NULL, 0xf028 }  /* volume */
 
 /* geometry (pixels) */
 #define WS_HUD_BTN_W            44   /* button width  */
@@ -298,7 +307,7 @@
 /* ------------------------------------------------------------
  * APP COMMANDS
  * ------------------------------------------------------------ */
-#define WS_TERM_CMD       "foot"
+#define WS_TERM_CMD       "footclient"
 #define WS_LAUNCHER_CMD   "dwl-launcher"
 #define WS_BROWSER_CMD    "librewolf"
 #define WS_EDITOR_CMD     "code"
